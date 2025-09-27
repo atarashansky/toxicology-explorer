@@ -17,10 +17,15 @@ import {
   DescriptorStats,
   MetadataStats,
 } from "@/types/MetadataStats";
+import {
+  CompoundUncertaintyBadges,
+  UncertaintyBadgeLevel,
+} from "@/types/UncertaintyBadges";
 
 interface CompoundRowProps {
   compound: Compound;
   metadataStats?: MetadataStats;
+  uncertaintyBadges?: CompoundUncertaintyBadges;
 }
 
 interface DescriptorDisplayConfig {
@@ -61,6 +66,11 @@ const LD_COLORS: Record<(typeof LD_SUFFIXES)[number], string> = {
   ld20: "#fbbf24",
   ld50: "#f97316",
   ld80: "#dc2626",
+};
+const BADGE_STYLES: Record<UncertaintyBadgeLevel, string> = {
+  LOW: "bg-green-100 text-green-700 border border-green-200",
+  MEDIUM: "bg-yellow-100 text-yellow-800 border border-yellow-200",
+  HIGH: "bg-red-100 text-red-700 border border-red-200",
 };
 
 const formatDescriptorValue = (value?: number, decimals = 2) => {
@@ -179,6 +189,7 @@ const formatResponse = (value: number) => {
 const CompoundRowComponent: React.FC<CompoundRowProps> = ({
   compound,
   metadataStats,
+  uncertaintyBadges,
 }) => {
   const availableEndpoints = useMemo(
     () =>
@@ -287,10 +298,13 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
 
   const ladderRows = useMemo(() => {
     return toxicityRows.map((row) => {
+      const uncertainty = uncertaintyBadges?.[row.endpoint.key];
       const sanitized = row.values.map((value) =>
         value != null && value > 0 ? value : undefined
       );
-      const numeric = sanitized.filter((value): value is number => value != null);
+      const numeric = sanitized.filter(
+        (value): value is number => value != null
+      );
       const min = numeric.length > 0 ? Math.min(...numeric) : undefined;
       const max = numeric.length > 0 ? Math.max(...numeric) : undefined;
 
@@ -300,9 +314,10 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
         values: sanitized,
         min,
         max,
+        badge: uncertainty?.badge,
       };
     });
-  }, [toxicityRows]);
+  }, [toxicityRows, uncertaintyBadges]);
 
   const ladderDomain = useMemo(() => {
     let min = Number.POSITIVE_INFINITY;
@@ -334,51 +349,33 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
     return [paddedMin, paddedMax] as const;
   }, [ladderRows]);
 
-  const ladderRangeSegments = useMemo(
-    () =>
-      ladderRows
-        .filter(
-          (row) =>
-            row.min != null &&
-            row.max != null &&
-            row.min > 0 &&
-            row.max > 0 &&
-            row.min !== row.max
-        )
-        .map((row) => ({
-          key: row.key,
-          data: [
-            { x: row.min as number, y: row.label },
-            { x: row.max as number, y: row.label },
-          ],
-        })),
-    [ladderRows]
-  );
+  const ladderScale = useMemo(() => {
+    if (ladderRows.length === 0) {
+      return null;
+    }
 
-  const ldScatterSeries = useMemo(
-    () =>
-      LD_SUFFIXES.map((suffix, index) => ({
-        suffix,
-        label: suffix.toUpperCase(),
-        color: LD_COLORS[suffix],
-        data: ladderRows.flatMap((row) => {
-          const value = row.values[index];
-          if (value == null || value <= 0) {
-            return [];
-          }
-          return [
-            {
-              x: value,
-              y: row.label,
-              endpointKey: row.key,
-              endpointLabel: row.label,
-              ldLabel: suffix.toUpperCase(),
-            },
-          ];
-        }),
-      })),
-    [ladderRows]
-  );
+    const [domainMin, domainMax] = ladderDomain;
+    const logMin = Math.log10(domainMin);
+    const logMax = Math.log10(domainMax);
+    const denominator = logMax - logMin || 1;
+
+    return (value: number) => {
+      const clamped = Math.max(domainMin, Math.min(domainMax, value));
+      const ratio = (Math.log10(clamped) - logMin) / denominator;
+      return Math.min(100, Math.max(0, ratio * 100));
+    };
+  }, [ladderDomain, ladderRows.length]);
+
+  const ladderTicks = useMemo(() => {
+    const [domainMin, domainMax] = ladderDomain;
+    const logMin = Math.log10(domainMin);
+    const logMax = Math.log10(domainMax);
+
+    const divisions = 4;
+    return Array.from({ length: divisions + 1 }, (_, index) =>
+      Math.pow(10, logMin + ((logMax - logMin) / divisions) * index)
+    );
+  }, [ladderDomain]);
 
   const doseDomain = useMemo(() => {
     if (!chartData || chartData.length === 0) {
@@ -402,6 +399,8 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
     () => ENDPOINTS.find((endpoint) => endpoint.key === selectedEndpoint),
     [selectedEndpoint]
   );
+
+  const selectedEndpointBadge = uncertaintyBadges?.[selectedEndpoint]?.badge;
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition-shadow hover:shadow-md">
@@ -437,87 +436,127 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
         <div className="flex w-full flex-col gap-4 lg:w-1/3">
           <div className="rounded-lg border border-gray-200 p-4">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-gray-900">
-                LD Ladder
-              </h3>
+              <h3 className="text-sm font-semibold text-gray-900">LD Ladder</h3>
             </div>
-            {ladderRows.length === 0 ? (
+            {!ladderScale || ladderRows.length === 0 ? (
               <div className="h-60 flex items-center justify-center text-sm text-gray-500">
                 LD data not available.
               </div>
             ) : (
-              <div className="h-60">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart
-                    data={ladderRows}
-                    margin={{ top: 16, right: 24, bottom: 16, left: 0 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis
-                      type="number"
-                      scale="log"
-                      domain={ladderDomain}
-                      tickFormatter={formatDose}
-                      stroke="#4b5563"
-                    />
-                    <YAxis
-                      type="category"
-                      dataKey="label"
-                      stroke="#4b5563"
-                      width={90}
-                    />
-                    <Tooltip
-                      cursor={{ stroke: "#94a3b8", strokeDasharray: "3 3" }}
-                      formatter={(value: number | string, _name: string, item) => {
-                        const payload = item?.payload as
-                          | { ldLabel?: string; endpointLabel?: string; x?: number }
-                          | undefined;
-                        const label = payload?.ldLabel ?? "LD";
-                        const numericValue =
-                          typeof value === "number" ? value : Number(value);
-                        return [formatDose(numericValue), label];
-                      }}
-                      labelFormatter={(label) =>
-                        typeof label === "string"
-                          ? `Endpoint: ${label}`
-                          : undefined
-                      }
-                    />
-                    <Legend
-                      verticalAlign="top"
-                      align="right"
-                      iconType="circle"
-                      wrapperStyle={{ paddingBottom: 12 }}
-                    />
-                    {ladderRangeSegments.map((segment) => (
-                      <Scatter
-                        key={`range-${segment.key}`}
-                        data={segment.data}
-                        line={{ stroke: "#d1d5db", strokeWidth: 4, strokeLinecap: "round" }}
-                        shape={() => null}
+              <div className="space-y-6">
+                <div className="flex flex-wrap gap-4 text-xs text-gray-600">
+                  {LD_SUFFIXES.map((suffix) => (
+                    <div
+                      key={`legend-${suffix}`}
+                      className="flex items-center gap-2"
+                    >
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: LD_COLORS[suffix] }}
                       />
-                    ))}
-                    {ldScatterSeries.map((series) => (
-                      <Scatter
-                        key={series.suffix}
-                        name={series.label}
-                        data={series.data}
-                        fill={series.color}
-                        shape="circle"
-                        legendType="circle"
-                      />
-                    ))}
-                  </ComposedChart>
-                </ResponsiveContainer>
+                      <span>{suffix.toUpperCase()}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-4">
+                  {ladderRows.map((row) => (
+                    <div key={row.key} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-gray-600">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-800">
+                            {row.label}
+                          </span>
+                          {row.badge ? (
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+                                BADGE_STYLES[row.badge]
+                              }`}
+                            >
+                              {row.badge}
+                            </span>
+                          ) : null}
+                        </div>
+                        {row.min != null && row.max != null ? (
+                          <span>{`${formatDose(row.min)} - ${formatDose(
+                            row.max
+                          )}`}</span>
+                        ) : (
+                          <span className="text-gray-400">No LD range</span>
+                        )}
+                      </div>
+                      <div className="relative h-2 rounded bg-gray-200">
+                        {row.min != null && row.max != null ? (
+                          <span
+                            className="absolute top-0 bottom-0 rounded bg-gray-400/70"
+                            style={{
+                              left: `${ladderScale(row.min)}%`,
+                              width: `${Math.max(
+                                ladderScale(row.max) - ladderScale(row.min),
+                                2
+                              )}%`,
+                            }}
+                          />
+                        ) : null}
+                        {row.values.map((value, index) => {
+                          if (value == null || value <= 0) {
+                            return null;
+                          }
+                          const position = ladderScale(value);
+                          return (
+                            <span
+                              key={`${row.key}-${LD_SUFFIXES[index]}`}
+                              className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white shadow-sm"
+                              style={{
+                                left: `${position}%`,
+                                backgroundColor: LD_COLORS[LD_SUFFIXES[index]],
+                              }}
+                              title={`${row.label} ${LD_SUFFIXES[
+                                index
+                              ].toUpperCase()}: ${formatDose(value)}`}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="pt-2">
+                  <div className="relative h-px bg-gray-200" />
+                  <div className="relative mt-1 h-4">
+                    {ladderTicks.map((tick) => {
+                      const position = ladderScale(tick);
+                      return (
+                        <span
+                          key={`tick-${tick}`}
+                          className="absolute -translate-x-1/2 text-[11px] text-gray-500"
+                          style={{ left: `${position}%` }}
+                        >
+                          {formatDose(tick)}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             )}
           </div>
 
           <div className="rounded-lg border border-gray-200 p-4">
             <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <h3 className="text-sm font-semibold text-gray-900">
-                Dose-Response
-              </h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-gray-900">
+                  Dose-Response
+                </h3>
+                {selectedEndpointBadge ? (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${BADGE_STYLES[selectedEndpointBadge]}`}
+                  >
+                    {selectedEndpointBadge}
+                  </span>
+                ) : null}
+              </div>
               <select
                 value={selectedEndpoint}
                 onChange={(event) =>

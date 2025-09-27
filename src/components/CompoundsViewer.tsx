@@ -8,6 +8,10 @@ import {
   MetadataStats,
 } from "@/types/MetadataStats";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
+import {
+  UncertaintyBadgesMap,
+  CompoundUncertaintyBadges,
+} from "@/types/UncertaintyBadges";
 
 function useDebounce<T>(value: T, delay: number, onChange: (value: T) => void) {
   const [pendingValue, setPendingValue] = useState<T>(value);
@@ -53,6 +57,8 @@ interface CompoundsViewerProps {
   data?: Compound[];
   metadataStatsUrl?: string;
   metadataStatsData?: MetadataStats;
+  uncertaintyBadgesUrl?: string;
+  uncertaintyBadgesData?: UncertaintyBadgesMap;
 }
 
 interface RangeFilterValue {
@@ -350,6 +356,8 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
   data,
   metadataStatsUrl = "/metadata_stats.json",
   metadataStatsData,
+  uncertaintyBadgesUrl = "/uncertainty_badges.json",
+  uncertaintyBadgesData,
 }) => {
   const [compounds, setCompounds] = useState<Compound[]>([]);
   const [metadataStats, setMetadataStats] = useState<MetadataStats | null>(
@@ -358,6 +366,8 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
   const [filters, setFilters] = useState<FiltersState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [uncertaintyBadges, setUncertaintyBadges] =
+    useState<UncertaintyBadgesMap | null>(null);
 
   useEffect(() => {
     const loadData = async () => {
@@ -384,9 +394,21 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
               return response.json();
             });
 
-        const [dataset, stats] = await Promise.all([
+        const badgesPromise = uncertaintyBadgesData
+          ? Promise.resolve(uncertaintyBadgesData)
+          : fetch(uncertaintyBadgesUrl).then((response) => {
+              if (!response.ok) {
+                throw new Error(
+                  `Failed to fetch uncertainty badges: ${response.status} ${response.statusText}`
+                );
+              }
+              return response.json();
+            });
+
+        const [dataset, stats, badges] = await Promise.all([
           datasetPromise,
           statsPromise,
+          badgesPromise,
         ]);
 
         if (!Array.isArray(dataset)) {
@@ -395,6 +417,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
 
         setCompounds(dataset);
         setMetadataStats(stats);
+        setUncertaintyBadges(badges);
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Failed to load compounds"
@@ -655,6 +678,11 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                       <CompoundRow
                         compound={compound}
                         metadataStats={metadataStats}
+                        uncertaintyBadges={
+                          uncertaintyBadges?.[compound.name] as
+                            | CompoundUncertaintyBadges
+                            | undefined
+                        }
                       />
                     </div>
                   </div>
