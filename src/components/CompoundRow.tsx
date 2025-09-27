@@ -639,7 +639,7 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
           <div className="rounded-lg border border-gray-200 p-4">
             <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-gray-900">
+                <h3 className="text-xs font-semibold text-gray-900">
                   Dose-Response
                 </h3>
                 {selectedEndpointBadge ? (
