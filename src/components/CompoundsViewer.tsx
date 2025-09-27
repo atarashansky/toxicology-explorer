@@ -102,6 +102,18 @@ const RANGE_FILTERS: RangeFilterConfig[] = [
   { key: "sas_score", label: "SAS", step: 0.01, decimals: 2 },
 ];
 
+const HISTOGRAM_KEYS: DescriptorKey[] = [
+  "mw",
+  "logp",
+  "tpsa",
+  "qed_value",
+  "sas_score",
+  "logd",
+  "hbd",
+  "hba",
+  "fcsp3",
+];
+
 const DISCRETE_FILTERS: DiscreteFilterConfig[] = [
   {
     key: "logd",
@@ -211,8 +223,9 @@ const RangeFilterControl: React.FC<{
   config: RangeFilterConfig;
   value?: RangeFilterValue;
   stats?: DescriptorStats;
+  histogram?: number[];
   onChange: (value: RangeFilterValue) => void;
-}> = ({ config, value, stats, onChange }) => {
+}> = ({ config, value, stats, histogram, onChange }) => {
   const { pendingValue, scheduleChange } = useDebounce(
     value ?? { min: 0, max: 0 },
     200,
@@ -246,7 +259,24 @@ const RangeFilterControl: React.FC<{
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-sm text-gray-600">
+      {histogram && histogram.length > 0 && (
+        <div className="mt-2">
+          <div className="relative h-14 overflow-hidden rounded bg-gray-100">
+            <div className="absolute inset-0 flex items-end gap-[1px] px-1">
+              {histogram.map((height, index) => (
+                <span
+                  key={`${config.key}-hist-${index}`}
+                  className="flex-1 rounded-t bg-blue-200/70"
+                  style={{ height: `${Math.max(height, 0.05) * 100}%` }}
+                />
+              ))}
+            </div>
+            <div className="absolute inset-0 rounded border border-blue-200/40" />
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-gray-600">
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-wide text-gray-500">
             Min
@@ -428,7 +458,14 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     };
 
     loadData();
-  }, [data, dataUrl, metadataStatsData, metadataStatsUrl]);
+  }, [
+    data,
+    dataUrl,
+    metadataStatsData,
+    metadataStatsUrl,
+    uncertaintyBadgesData,
+    uncertaintyBadgesUrl,
+  ]);
 
   useEffect(() => {
     if (!metadataStats) {
@@ -501,6 +538,54 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
       return true;
     });
   }, [compounds, filters, metadataStats]);
+
+  const histogramData = useMemo(() => {
+    if (compounds.length === 0 || !metadataStats) {
+      return null;
+    }
+
+    const BIN_COUNT = 24;
+    const result: Partial<Record<DescriptorKey, number[]>> = {};
+
+    HISTOGRAM_KEYS.forEach((key) => {
+      const stats = metadataStats[key];
+      if (!stats) {
+        return;
+      }
+
+      const min = stats.min;
+      const max = stats.max;
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+        return;
+      }
+
+      const range = max - min;
+      const bins = new Array(BIN_COUNT).fill(0);
+
+      compounds.forEach((compound) => {
+        const rawValue = compound[key as keyof Compound];
+        if (typeof rawValue !== "number") {
+          return;
+        }
+
+        const normalized = (rawValue - min) / range;
+        if (Number.isNaN(normalized) || !Number.isFinite(normalized)) {
+          return;
+        }
+
+        const clamped = Math.min(
+          BIN_COUNT - 1,
+          Math.max(0, Math.floor(normalized * BIN_COUNT))
+        );
+        bins[clamped] += 1;
+      });
+
+      const maxCount = Math.max(...bins);
+      result[key] = maxCount > 0 ? bins.map((value) => value / maxCount) : bins;
+    });
+
+    return result;
+  }, [compounds, metadataStats]);
 
   const estimateRowHeight = useCallback(() => 480, []);
 
@@ -619,6 +704,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                 config={config}
                 value={filters.range[config.key]}
                 stats={metadataStats[config.key]}
+                histogram={histogramData?.[config.key]}
                 onChange={(value) => handleRangeChange(config.key, value)}
               />
             ))}
@@ -683,6 +769,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                             | CompoundUncertaintyBadges
                             | undefined
                         }
+                        descriptorHistograms={histogramData ?? undefined}
                       />
                     </div>
                   </div>

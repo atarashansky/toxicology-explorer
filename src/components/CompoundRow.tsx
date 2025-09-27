@@ -26,6 +26,7 @@ interface CompoundRowProps {
   compound: Compound;
   metadataStats?: MetadataStats;
   uncertaintyBadges?: CompoundUncertaintyBadges;
+  descriptorHistograms?: Partial<Record<DescriptorKey, number[]>>;
 }
 
 interface DescriptorDisplayConfig {
@@ -73,6 +74,20 @@ const BADGE_STYLES: Record<UncertaintyBadgeLevel, string> = {
   HIGH: "bg-red-100 text-red-700 border border-red-200",
 };
 
+type TherapeuticWindowLevel = "BROAD" | "MODERATE" | "NARROW" | "ALERT";
+
+const THERAPEUTIC_BADGE_STYLES: Record<TherapeuticWindowLevel, string> = {
+  BROAD: "bg-green-100 text-green-800 border border-green-200",
+  MODERATE: "bg-yellow-100 text-yellow-800 border border-yellow-200",
+  NARROW: "bg-orange-100 text-orange-800 border border-orange-200",
+  ALERT: "bg-red-100 text-red-700 border border-red-200",
+};
+
+interface TherapeuticWindowSummary {
+  ratio: number;
+  level: TherapeuticWindowLevel;
+}
+
 const formatDescriptorValue = (value?: number, decimals = 2) => {
   if (value == null || Number.isNaN(value)) {
     return "N/A";
@@ -100,7 +115,8 @@ const DescriptorBar: React.FC<{
   config: DescriptorDisplayConfig;
   value?: number;
   stats?: DescriptorStats;
-}> = ({ config, value, stats }) => {
+  histogram?: number[];
+}> = ({ config, value, stats, histogram }) => {
   const { label, unit, decimals } = config;
   const range = stats ? stats.max - stats.min : 0;
   const valuePercent =
@@ -121,22 +137,49 @@ const DescriptorBar: React.FC<{
           {unit ? ` ${unit}` : ""}
         </span>
       </div>
-      <div className="relative h-2 w-full rounded bg-gray-200">
-        {stats && (
-          <>
-            <div
-              className="absolute top-0 bottom-0 w-0.5 bg-gray-400"
-              style={{ left: `${meanPercent}%` }}
-            />
-            {value != null && (
-              <div
-                className="absolute -top-1 h-4 w-1 rounded bg-blue-600"
-                style={{ left: `calc(${valuePercent}% - 0.5px)` }}
+      {histogram && stats ? (
+        <div className="relative mt-2 h-16 overflow-hidden rounded bg-gray-100">
+          <div className="absolute inset-0 flex items-end gap-[1px] px-1 pb-1">
+            {histogram.map((height, index) => (
+              <span
+                key={`${config.key}-hist-${index}`}
+                className="flex-1 rounded-t bg-blue-200/70"
+                style={{ height: `${Math.max(height, 0.05) * 100}%` }}
               />
-            )}
-          </>
-        )}
-      </div>
+            ))}
+          </div>
+          <div className="absolute inset-0 rounded border border-blue-200/40" />
+          <div
+            className="absolute top-0 bottom-0 w-0.5 bg-gray-400/80"
+            style={{ left: `${meanPercent}%` }}
+            aria-hidden
+          />
+          {value != null && (
+            <div
+              className="absolute top-0 bottom-0 w-0.5 bg-blue-600"
+              style={{ left: `${valuePercent}%` }}
+              aria-hidden
+            />
+          )}
+        </div>
+      ) : (
+        <div className="relative h-2 w-full rounded bg-gray-200">
+          {stats && (
+            <>
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-gray-400"
+                style={{ left: `${meanPercent}%` }}
+              />
+              {value != null && (
+                <div
+                  className="absolute -top-1 h-4 w-1 rounded bg-blue-600"
+                  style={{ left: `calc(${valuePercent}% - 0.5px)` }}
+                />
+              )}
+            </>
+          )}
+        </div>
+      )}
       {stats && (
         <div className="flex justify-between text-[10px] text-gray-500">
           <span>{formatDescriptorValue(stats.min, decimals)}</span>
@@ -190,7 +233,36 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
   compound,
   metadataStats,
   uncertaintyBadges,
+  descriptorHistograms,
 }) => {
+  const therapeuticWindow = useMemo<TherapeuticWindowSummary | null>(() => {
+    const efficacy = compound.bioactivity_ld50;
+    const toxicity = compound.cell_count_ld50;
+
+    if (
+      typeof efficacy !== "number" ||
+      typeof toxicity !== "number" ||
+      efficacy <= 0 ||
+      toxicity <= 0
+    ) {
+      return null;
+    }
+
+    const ratio = toxicity / efficacy;
+
+    let level: TherapeuticWindowLevel;
+    if (ratio >= 10) {
+      level = "BROAD";
+    } else if (ratio >= 3) {
+      level = "MODERATE";
+    } else if (ratio >= 1) {
+      level = "NARROW";
+    } else {
+      level = "ALERT";
+    }
+
+    return { ratio, level };
+  }, [compound.bioactivity_ld50, compound.cell_count_ld50]);
   const availableEndpoints = useMemo(
     () =>
       ENDPOINTS.filter((endpoint) => {
@@ -419,6 +491,26 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
             </div>
             <div>ID: {compound.id}</div>
             {compound.split && <div>Split: {compound.split}</div>}
+            {therapeuticWindow && (
+              <div className="mt-2 flex flex-col gap-1 text-xs text-gray-600">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-gray-800">
+                    Therapeutic Window
+                  </span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+                      THERAPEUTIC_BADGE_STYLES[therapeuticWindow.level]
+                    }`}
+                  >
+                    {therapeuticWindow.level}
+                  </span>
+                </div>
+                <span>
+                  Cell Count LD50 is {therapeuticWindow.ratio.toFixed(2)}x
+                  higher than Bioactivity LD50
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -429,6 +521,7 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
               config={descriptor}
               value={compound[descriptor.key] as number | undefined}
               stats={metadataStats?.[descriptor.key]}
+              histogram={descriptorHistograms?.[descriptor.key]}
             />
           ))}
         </div>
@@ -664,7 +757,8 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
 const CompoundRow = memo(CompoundRowComponent, (prevProps, nextProps) => {
   return (
     prevProps.compound.id === nextProps.compound.id &&
-    prevProps.metadataStats === nextProps.metadataStats
+    prevProps.metadataStats === nextProps.metadataStats &&
+    prevProps.descriptorHistograms === nextProps.descriptorHistograms
   );
 });
 
