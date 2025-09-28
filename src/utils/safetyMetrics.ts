@@ -71,17 +71,6 @@ export const calculateAggregateMargin = (
   return minMargin;
 };
 
-export const calculateSafetyMetric = (
-  compound: Compound,
-  therapeuticDose: number
-): number => {
-  const aggregate = calculateAggregateMargin(compound, therapeuticDose);
-  if (aggregate == null || !Number.isFinite(aggregate)) {
-    return 0;
-  }
-  return aggregate;
-};
-
 export const classifyMarginLevel = (margin: number | null) => {
   if (margin == null || !Number.isFinite(margin)) {
     return "ALERT" as const;

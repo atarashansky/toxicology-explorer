@@ -41,6 +41,12 @@ interface FiltersState {
   discrete: DiscreteFilterState;
 }
 
+type SortOption = "none" | "safety-asc" | "safety-desc";
+
+interface SortState {
+  option: SortOption;
+}
+
 interface EmbeddingPointBase {
   id: string;
   x: number;
@@ -241,6 +247,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     min: number;
     max: number;
   } | null>(null);
+  const [sortState, setSortState] = useState<SortState>({ option: "none" });
 
   useEffect(() => {
     const loadData = async () => {
@@ -544,7 +551,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
   const filteredCompounds = useMemo(() => {
     const appliesEmbeddingFilter = embeddingSelection.length > 0;
 
-    return compounds.filter((compound) => {
+    const filtered = compounds.filter((compound) => {
       if (appliesEmbeddingFilter && !embeddingSelectionSet.has(compound.name)) {
         return false;
       }
@@ -587,12 +594,42 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
 
       return true;
     });
+
+    // Apply sorting
+    if (sortState.option === "none") {
+      return filtered;
+    }
+
+    return [...filtered].sort((a, b) => {
+      const marginA = compoundMargins.get(a.name)?.aggregate;
+      const marginB = compoundMargins.get(b.name)?.aggregate;
+
+      // Handle null/undefined values - put them at the end
+      if (marginA == null && marginB == null) return 0;
+      if (marginA == null) return 1;
+      if (marginB == null) return -1;
+
+      // Handle NaN values
+      if (!Number.isFinite(marginA) && !Number.isFinite(marginB)) return 0;
+      if (!Number.isFinite(marginA)) return 1;
+      if (!Number.isFinite(marginB)) return -1;
+
+      if (sortState.option === "safety-asc") {
+        return marginA - marginB;
+      } else if (sortState.option === "safety-desc") {
+        return marginB - marginA;
+      }
+
+      return 0;
+    });
   }, [
     compounds,
     embeddingSelection.length,
     embeddingSelectionSet,
     filters,
     metadataStats,
+    sortState.option,
+    compoundMargins,
   ]);
 
   const histogramData = useMemo(() => {
@@ -776,12 +813,44 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     <div className="min-h-screen bg-gray-50">
       <div className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <h1 className="text-3xl font-bold text-gray-900">
-            Toxicity Explorer
-          </h1>
-          <p className="text-gray-600 mt-2">
-            Showing {filteredCompounds.length} of {compounds.length} compounds
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">
+                Toxicity Explorer
+              </h1>
+              <p className="text-gray-600 mt-2">
+                Showing {filteredCompounds.length} of {compounds.length}{" "}
+                compounds
+              </p>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="sort-select"
+                  className="text-sm font-medium text-gray-700"
+                >
+                  Sort by:
+                </label>
+                <select
+                  id="sort-select"
+                  value={sortState.option}
+                  onChange={(e) =>
+                    setSortState({ option: e.target.value as SortOption })
+                  }
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="none">No sorting</option>
+                  <option value="safety-desc">Safety (High to Low)</option>
+                  <option value="safety-asc">Safety (Low to High)</option>
+                </select>
+                {sortState.option !== "none" && (
+                  <span className="text-xs text-gray-500">
+                    (Therapeutic window safety margin)
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -825,10 +894,10 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
             </p>
           </div>
         ) : (
-          <div className="relative">
+          <div className="relative overflow-visible">
             <div
               style={{ height: rowVirtualizer.getTotalSize() }}
-              className="relative w-full"
+              className="relative w-full overflow-visible"
             >
               {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                 const compound = filteredCompounds[virtualRow.index];
@@ -841,7 +910,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                   <div
                     key={virtualRow.key}
                     ref={rowVirtualizer.measureElement}
-                    className="absolute left-0 right-0"
+                    className="absolute left-0 right-0 overflow-visible"
                     style={{ transform: `translateY(${virtualRow.start}px)` }}
                     data-index={virtualRow.index}
                   >

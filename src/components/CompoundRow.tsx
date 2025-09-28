@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState, memo } from "react";
+import { createPortal } from "react-dom";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -176,6 +177,9 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
   const [selectedEndpoint, setSelectedEndpoint] = useState<EndpointKey>(
     availableEndpoints[0]?.key ?? ENDPOINTS[0].key
   );
+
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
 
   const therapeuticWindowMessage = useMemo(() => {
     if (!therapeuticWindow || therapeuticWindow.ratio == null) {
@@ -398,11 +402,26 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
     [selectedEndpoint]
   );
 
+  const handleTooltipMouseEnter = (
+    event: React.MouseEvent<HTMLButtonElement>
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setTooltipPosition({
+      x: rect.left,
+      y: rect.bottom + 8,
+    });
+    setTooltipVisible(true);
+  };
+
+  const handleTooltipMouseLeave = () => {
+    setTooltipVisible(false);
+  };
+
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm transition-shadow hover:shadow-md w-full max-w-5xl mx-auto">
+    <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm transition-shadow hover:shadow-md w-full max-w-5xl mx-auto overflow-visible">
       <div className="flex flex-row gap-4 items-stretch">
         {/* Left: Compound info in column layout */}
-        <div className="flex w-80 flex-col gap-3">
+        <div className="flex w-80 flex-col gap-3 overflow-visible">
           <MoleculeRenderer
             smiles={compound.smiles}
             inchi={compound.inchi}
@@ -443,44 +462,14 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
             )}
 
             {/* Properties tooltip trigger */}
-            <div className="group relative">
-              <button className="text-xs text-blue-600 hover:text-blue-800 underline">
+            <div className="relative overflow-visible">
+              <button
+                className="text-xs text-blue-600 hover:text-blue-800 underline"
+                onMouseEnter={handleTooltipMouseEnter}
+                onMouseLeave={handleTooltipMouseLeave}
+              >
                 View Properties ({DESCRIPTORS.length} descriptors)
               </button>
-              <div className="absolute left-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-xl p-3 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
-                <h4 className="text-sm font-semibold text-gray-800 mb-2">
-                  Properties
-                </h4>
-                <div className="grid grid-cols-2 gap-2">
-                  {DESCRIPTORS.map((descriptor) => {
-                    const value = compound[descriptor.key] as
-                      | number
-                      | undefined;
-                    const formattedValue = formatDescriptorValue(
-                      value,
-                      descriptor.decimals
-                    );
-                    return (
-                      <div
-                        key={descriptor.key}
-                        className="flex justify-between text-xs"
-                      >
-                        <span className="text-gray-600">
-                          {descriptor.label}:
-                        </span>
-                        <span className="font-medium text-gray-900">
-                          {formattedValue}
-                          {descriptor.unit && (
-                            <span className="text-gray-500 ml-1">
-                              {descriptor.unit}
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -695,6 +684,51 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Portal-based tooltip */}
+      {tooltipVisible &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="fixed w-80 bg-white border border-gray-200 rounded-lg shadow-xl p-3 z-[9999]"
+            style={{
+              left: tooltipPosition.x,
+              top: tooltipPosition.y,
+            }}
+            onMouseEnter={() => setTooltipVisible(true)}
+            onMouseLeave={() => setTooltipVisible(false)}
+          >
+            <h4 className="text-sm font-semibold text-gray-800 mb-2">
+              Properties
+            </h4>
+            <div className="grid grid-cols-2 gap-2">
+              {DESCRIPTORS.map((descriptor) => {
+                const value = compound[descriptor.key] as number | undefined;
+                const formattedValue = formatDescriptorValue(
+                  value,
+                  descriptor.decimals
+                );
+                return (
+                  <div
+                    key={descriptor.key}
+                    className="flex justify-between text-xs"
+                  >
+                    <span className="text-gray-600">{descriptor.label}:</span>
+                    <span className="font-medium text-gray-900">
+                      {formattedValue}
+                      {descriptor.unit && (
+                        <span className="text-gray-500 ml-1">
+                          {descriptor.unit}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };
