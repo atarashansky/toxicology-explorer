@@ -1,89 +1,36 @@
 "use client";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Compound } from "@/types/Compound";
 import CompoundRow from "./CompoundRow";
-import {
-  DescriptorKey,
-  DescriptorStats,
-  MetadataStats,
-} from "@/types/MetadataStats";
+import { RangeFilterValue, RangeFilterConfig } from "./RangeFilterControl";
+import CompoundsFilters from "./CompoundsFilters";
+import EmbeddingExplorerControl from "./EmbeddingExplorerControl";
+import TherapeuticDoseControl from "./TherapeuticDoseControl";
+import EmbeddingModal from "./EmbeddingModal";
+import { DiscreteFilterConfig } from "./DiscreteFilterControl";
+import { DescriptorKey, MetadataStats } from "@/types/MetadataStats";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
+import { EmbeddingPoint, EmbeddingWeightOption } from "./EmbeddingExplorer";
 import {
-  UncertaintyBadgesMap,
-  CompoundUncertaintyBadges,
-} from "@/types/UncertaintyBadges";
-
-function useDebounce<T>(value: T, delay: number, onChange: (value: T) => void) {
-  const [pendingValue, setPendingValue] = useState<T>(value);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-    setPendingValue(value);
-  }, [value]);
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
-    };
-  }, []);
-
-  const scheduleChange = (nextValue: T) => {
-    if (nextValue === pendingValue) {
-      return;
-    }
-
-    setPendingValue(nextValue);
-
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-
-    debounceRef.current = setTimeout(() => {
-      onChange(nextValue);
-      debounceRef.current = null;
-    }, delay);
-  };
-
-  return { pendingValue, scheduleChange };
-}
+  calculateAggregateMargin,
+  calculateEndpointMargin,
+  EndpointMarginMap,
+  TOXIC_ENDPOINT_PREFIXES,
+} from "@/utils/safetyMetrics";
+import { parseNumericArrayString } from "@/utils/parsing";
+import { useDebounce } from "@/hooks";
 
 interface CompoundsViewerProps {
   dataUrl?: string;
   data?: Compound[];
   metadataStatsUrl?: string;
   metadataStatsData?: MetadataStats;
-  uncertaintyBadgesUrl?: string;
-  uncertaintyBadgesData?: UncertaintyBadgesMap;
-}
-
-interface RangeFilterValue {
-  min: number;
-  max: number;
-}
-
-interface RangeFilterConfig {
-  key: DescriptorKey;
-  label: string;
-  unit?: string;
-  step: number;
-  decimals: number;
-}
-
-interface DiscreteOption {
-  value: string;
-  label: string;
-  predicate: (value: number | undefined) => boolean;
-}
-
-interface DiscreteFilterConfig {
-  key: DescriptorKey;
-  label: string;
-  options: DiscreteOption[];
 }
 
 type RangeFilterState = Partial<Record<DescriptorKey, RangeFilterValue>>;
@@ -93,6 +40,62 @@ interface FiltersState {
   range: RangeFilterState;
   discrete: DiscreteFilterState;
 }
+
+interface EmbeddingPointBase {
+  id: string;
+  x: number;
+  y: number;
+}
+
+const parseEmbeddingCsv = (
+  csvText: string,
+  ids: string[]
+): EmbeddingPointBase[] => {
+  const lines = csvText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length <= 1) {
+    return [];
+  }
+
+  const body = lines.slice(1);
+  const total = Math.min(body.length, ids.length);
+  const points: EmbeddingPointBase[] = [];
+
+  for (let index = 0; index < total; index += 1) {
+    const row = body[index];
+    const segments = row.split(",");
+    const rawId = segments[0]?.trim();
+    const xValue = Number(segments[1]);
+    const yValue = Number(segments[2]);
+
+    if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) {
+      continue;
+    }
+
+    const fallbackId = ids[index];
+    const identifier = rawId && rawId.length > 0 ? rawId : fallbackId;
+    points.push({
+      id: identifier,
+      x: xValue,
+      y: yValue,
+    });
+  }
+
+  return points;
+};
+
+const EMBEDDING_OPTIONS: EmbeddingWeightOption[] = Array.from(
+  { length: 11 },
+  (_, index) => ({
+    index,
+    weight: index / 10,
+    label: `${(index / 10).toFixed(1)}`,
+    url: `/emb_${index}.csv`,
+  })
+);
 
 const RANGE_FILTERS: RangeFilterConfig[] = [
   { key: "mw", label: "MW", unit: "Da", step: 1, decimals: 0 },
@@ -207,187 +210,11 @@ const DISCRETE_FILTERS: DiscreteFilterConfig[] = [
   },
 ];
 
-const formatNumber = (value: number, decimals: number) => {
-  if (Number.isNaN(value)) {
-    return "N/A";
-  }
-
-  if (Math.abs(value) >= 1000) {
-    return value.toExponential(2);
-  }
-
-  return value.toFixed(decimals);
-};
-
-const RangeFilterControl: React.FC<{
-  config: RangeFilterConfig;
-  value?: RangeFilterValue;
-  stats?: DescriptorStats;
-  histogram?: number[];
-  onChange: (value: RangeFilterValue) => void;
-}> = ({ config, value, stats, histogram, onChange }) => {
-  const { pendingValue, scheduleChange } = useDebounce(
-    value ?? { min: 0, max: 0 },
-    200,
-    onChange
-  );
-
-  if (!stats || !value) {
-    return null;
-  }
-
-  const { label, unit, step, decimals } = config;
-
-  const clampMin = (nextValue: number) => {
-    const lowerBound = Math.max(stats.min, Math.min(nextValue, stats.max));
-    return Math.min(lowerBound, pendingValue.max);
-  };
-
-  const clampMax = (nextValue: number) => {
-    const upperBound = Math.min(stats.max, Math.max(nextValue, stats.min));
-    return Math.max(upperBound, pendingValue.min);
-  };
-
-  return (
-    <div className="flex flex-col gap-3 rounded-lg border border-gray-200 p-3">
-      <div className="flex items-center justify-between text-sm text-gray-600">
-        <span className="font-medium text-gray-800">{label}</span>
-        <span>
-          {formatNumber(pendingValue.min, decimals)} -{" "}
-          {formatNumber(pendingValue.max, decimals)}
-          {unit ? ` ${unit}` : ""}
-        </span>
-      </div>
-
-      {histogram && histogram.length > 0 && (
-        <div className="mt-2">
-          <div className="relative h-14 overflow-hidden rounded bg-gray-100">
-            <div className="absolute inset-0 flex items-end gap-[1px] px-1">
-              {histogram.map((height, index) => (
-                <span
-                  key={`${config.key}-hist-${index}`}
-                  className="flex-1 rounded-t bg-blue-200/70"
-                  style={{ height: `${Math.max(height, 0.05) * 100}%` }}
-                />
-              ))}
-            </div>
-            <div className="absolute inset-0 rounded border border-blue-200/40" />
-          </div>
-        </div>
-      )}
-
-      <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-gray-600">
-        <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-wide text-gray-500">
-            Min
-          </span>
-          <input
-            type="range"
-            min={stats.min}
-            max={stats.max}
-            step={step}
-            value={pendingValue.min}
-            onChange={(event) => {
-              const clamped = clampMin(Number(event.target.value));
-              scheduleChange({ min: clamped, max: pendingValue.max });
-            }}
-            className="w-full"
-          />
-          <input
-            type="number"
-            min={stats.min}
-            max={pendingValue.max}
-            step={step}
-            value={pendingValue.min}
-            onChange={(event) => {
-              const nextValue = Number(event.target.value);
-              if (Number.isNaN(nextValue)) {
-                return;
-              }
-              const clamped = clampMin(nextValue);
-              scheduleChange({ min: clamped, max: pendingValue.max });
-            }}
-            className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-wide text-gray-500">
-            Max
-          </span>
-          <input
-            type="range"
-            min={stats.min}
-            max={stats.max}
-            step={step}
-            value={pendingValue.max}
-            onChange={(event) => {
-              const clamped = clampMax(Number(event.target.value));
-              scheduleChange({ min: pendingValue.min, max: clamped });
-            }}
-            className="w-full"
-          />
-          <input
-            type="number"
-            min={pendingValue.min}
-            max={stats.max}
-            step={step}
-            value={pendingValue.max}
-            onChange={(event) => {
-              const nextValue = Number(event.target.value);
-              if (Number.isNaN(nextValue)) {
-                return;
-              }
-              const clamped = clampMax(nextValue);
-              scheduleChange({ min: pendingValue.min, max: clamped });
-            }}
-            className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-        </label>
-      </div>
-
-      <div className="grid grid-cols-3 text-xs text-gray-400">
-        <span>{formatNumber(stats.min, decimals)}</span>
-        <span className="text-center">
-          avg {formatNumber(stats.mean, decimals)}
-        </span>
-        <span className="text-right">{formatNumber(stats.max, decimals)}</span>
-      </div>
-    </div>
-  );
-};
-
-const DiscreteFilterControl: React.FC<{
-  config: DiscreteFilterConfig;
-  value?: string;
-  onChange: (value: string) => void;
-}> = ({ config, value, onChange }) => {
-  const { label, options } = config;
-  return (
-    <label className="flex flex-col gap-1 text-sm text-gray-700">
-      <span className="font-medium text-gray-800">{label}</span>
-      <select
-        value={value ?? options[0]?.value ?? ""}
-        onChange={(event) => onChange(event.target.value)}
-        className="rounded border border-gray-300 bg-white px-2 py-1 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-      >
-        {options.map((option) => (
-          <option key={`${config.key}-${option.value}`} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-};
-
 const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
   dataUrl = "/compounds_biology.json",
   data,
   metadataStatsUrl = "/metadata_stats.json",
   metadataStatsData,
-  uncertaintyBadgesUrl = "/uncertainty_badges.json",
-  uncertaintyBadgesData,
 }) => {
   const [compounds, setCompounds] = useState<Compound[]>([]);
   const [metadataStats, setMetadataStats] = useState<MetadataStats | null>(
@@ -396,8 +223,24 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
   const [filters, setFilters] = useState<FiltersState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [uncertaintyBadges, setUncertaintyBadges] =
-    useState<UncertaintyBadgesMap | null>(null);
+  const [embeddingIds, setEmbeddingIds] = useState<string[] | null>(null);
+  const [embeddingPoints, setEmbeddingPoints] = useState<
+    EmbeddingPoint[] | null
+  >(null);
+  const [embeddingBasePoints, setEmbeddingBasePoints] = useState<
+    EmbeddingPointBase[] | null
+  >(null);
+  const embeddingCache = useRef<Map<number, EmbeddingPointBase[]>>(new Map());
+  const [embeddingSelection, setEmbeddingSelection] = useState<string[]>([]);
+  const [embeddingWeightIndex, setEmbeddingWeightIndex] = useState<number>(5);
+  const [embeddingLoading, setEmbeddingLoading] = useState<boolean>(false);
+  const [embeddingError, setEmbeddingError] = useState<string | null>(null);
+  const [embeddingModalOpen, setEmbeddingModalOpen] = useState<boolean>(false);
+  const [therapeuticDose, setTherapeuticDose] = useState<number>(1.0);
+  const [doseRange, setDoseRange] = useState<{
+    min: number;
+    max: number;
+  } | null>(null);
 
   useEffect(() => {
     const loadData = async () => {
@@ -424,21 +267,9 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
               return response.json();
             });
 
-        const badgesPromise = uncertaintyBadgesData
-          ? Promise.resolve(uncertaintyBadgesData)
-          : fetch(uncertaintyBadgesUrl).then((response) => {
-              if (!response.ok) {
-                throw new Error(
-                  `Failed to fetch uncertainty badges: ${response.status} ${response.statusText}`
-                );
-              }
-              return response.json();
-            });
-
-        const [dataset, stats, badges] = await Promise.all([
+        const [dataset, stats] = await Promise.all([
           datasetPromise,
           statsPromise,
-          badgesPromise,
         ]);
 
         if (!Array.isArray(dataset)) {
@@ -447,7 +278,18 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
 
         setCompounds(dataset);
         setMetadataStats(stats);
-        setUncertaintyBadges(badges);
+
+        if (Array.isArray(dataset) && dataset.length > 0) {
+          const doseValues = parseNumericArrayString(dataset[0]?.doses);
+          if (doseValues && doseValues.length > 0) {
+            const min = Math.min(...doseValues);
+            const max = Math.max(...doseValues);
+            setDoseRange({ min, max });
+            setTherapeuticDose((previous) => {
+              return Math.min(Math.max(previous, min), max);
+            });
+          }
+        }
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Failed to load compounds"
@@ -458,14 +300,81 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     };
 
     loadData();
-  }, [
-    data,
-    dataUrl,
-    metadataStatsData,
-    metadataStatsUrl,
-    uncertaintyBadgesData,
-    uncertaintyBadgesUrl,
-  ]);
+  }, [data, dataUrl, metadataStatsData, metadataStatsUrl]);
+
+  useEffect(() => {
+    if (!embeddingModalOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setEmbeddingModalOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [embeddingModalOpen]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const originalOverflow = document.body.style.overflow;
+
+    if (embeddingModalOpen) {
+      document.body.style.overflow = "hidden";
+    }
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [embeddingModalOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadIds = async () => {
+      try {
+        const response = await fetch("/ids.txt");
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch embedding ids: ${response.status} ${response.statusText}`
+          );
+        }
+
+        const text = await response.text();
+        if (cancelled) {
+          return;
+        }
+
+        const lines = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        setEmbeddingIds(lines);
+      } catch (err) {
+        if (!cancelled) {
+          setEmbeddingError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load embedding identifiers"
+          );
+        }
+      }
+    };
+
+    loadIds();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!metadataStats) {
@@ -497,12 +406,153 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     });
   }, [metadataStats]);
 
-  const filteredCompounds = useMemo(() => {
-    if (!filters) {
-      return compounds;
+  const compoundMargins = useMemo(() => {
+    const map = new Map<
+      string,
+      { aggregate: number | null; endpoints: EndpointMarginMap }
+    >();
+
+    if (therapeuticDose <= 0) {
+      return map;
     }
 
+    compounds.forEach((compound) => {
+      const aggregate = calculateAggregateMargin(compound, therapeuticDose);
+      const endpoints: EndpointMarginMap = {};
+      TOXIC_ENDPOINT_PREFIXES.forEach((prefix) => {
+        endpoints[prefix] = calculateEndpointMargin(
+          compound,
+          prefix,
+          therapeuticDose
+        );
+      });
+      map.set(compound.name, { aggregate, endpoints });
+    });
+
+    return map;
+  }, [compounds, therapeuticDose]);
+
+  const compoundByName = useMemo(() => {
+    return new Map(compounds.map((compound) => [compound.name, compound]));
+  }, [compounds]);
+
+  const decorateEmbeddingPoints = useCallback(
+    (basePoints: EmbeddingPointBase[]): EmbeddingPoint[] => {
+      return basePoints.map((basePoint) => {
+        const compound = compoundByName.get(basePoint.id);
+        const marginData = compound
+          ? compoundMargins.get(compound.name)
+          : undefined;
+
+        return {
+          ...basePoint,
+          compound,
+          safetyMetric: marginData?.aggregate ?? null,
+        };
+      });
+    },
+    [compoundByName, compoundMargins]
+  );
+
+  useEffect(() => {
+    if (!embeddingIds || embeddingIds.length === 0) {
+      return;
+    }
+
+    if (compounds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadEmbedding = async () => {
+      const option = EMBEDDING_OPTIONS[embeddingWeightIndex];
+      if (!option) {
+        return;
+      }
+
+      const cachedBase = embeddingCache.current.get(option.index);
+      if (cachedBase) {
+        if (!cancelled) {
+          setEmbeddingBasePoints(cachedBase);
+          setEmbeddingSelection((previous) =>
+            previous.filter((id) => cachedBase.some((point) => point.id === id))
+          );
+        }
+        return;
+      }
+
+      setEmbeddingLoading(true);
+      setEmbeddingError(null);
+
+      try {
+        const response = await fetch(option.url);
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch embedding: ${response.status} ${response.statusText}`
+          );
+        }
+
+        const csvText = await response.text();
+        if (cancelled) {
+          return;
+        }
+
+        const parsedBase = parseEmbeddingCsv(csvText, embeddingIds);
+        embeddingCache.current.set(option.index, parsedBase);
+
+        if (!cancelled) {
+          setEmbeddingBasePoints(parsedBase);
+          setEmbeddingSelection((previous) =>
+            previous.filter((id) => parsedBase.some((point) => point.id === id))
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setEmbeddingError(
+            err instanceof Error ? err.message : "Failed to load embedding"
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setEmbeddingLoading(false);
+        }
+      }
+    };
+
+    loadEmbedding();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [compounds.length, embeddingIds, embeddingWeightIndex]);
+
+  useEffect(() => {
+    if (!embeddingBasePoints) {
+      setEmbeddingPoints(null);
+      return;
+    }
+
+    const decorated = decorateEmbeddingPoints(embeddingBasePoints);
+    setEmbeddingPoints(decorated);
+  }, [decorateEmbeddingPoints, embeddingBasePoints]);
+
+  const embeddingSelectionSet = useMemo(() => {
+    return new Set(embeddingSelection);
+  }, [embeddingSelection]);
+
+  const filteredCompounds = useMemo(() => {
+    const appliesEmbeddingFilter = embeddingSelection.length > 0;
+
     return compounds.filter((compound) => {
+      if (appliesEmbeddingFilter && !embeddingSelectionSet.has(compound.name)) {
+        return false;
+      }
+
+      if (!filters) {
+        return true;
+      }
+
       for (const config of RANGE_FILTERS) {
         const stats = metadataStats?.[config.key];
         const rangeFilter = filters.range[config.key];
@@ -537,7 +587,13 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
 
       return true;
     });
-  }, [compounds, filters, metadataStats]);
+  }, [
+    compounds,
+    embeddingSelection.length,
+    embeddingSelectionSet,
+    filters,
+    metadataStats,
+  ]);
 
   const histogramData = useMemo(() => {
     if (compounds.length === 0 || !metadataStats) {
@@ -601,7 +657,12 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     }
 
     rowVirtualizer.scrollToOffset(0, { behavior: "auto" });
-  }, [rowVirtualizer, filteredCompounds.length, filters]);
+  }, [
+    rowVirtualizer,
+    filteredCompounds.length,
+    filters,
+    embeddingSelection.length,
+  ]);
 
   const handleRangeChange = (key: DescriptorKey, value: RangeFilterValue) => {
     setFilters((previous) => {
@@ -660,6 +721,35 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
     });
   };
 
+  const handleEmbeddingSelectionChange = useCallback((ids: string[]) => {
+    setEmbeddingSelection(ids);
+  }, []);
+
+  const handleEmbeddingWeightChange = useCallback((index: number) => {
+    setEmbeddingWeightIndex(index);
+  }, []);
+
+  const closeEmbeddingModal = useCallback(() => {
+    setEmbeddingModalOpen(false);
+  }, []);
+
+  const handleTherapeuticDoseChange = useCallback(
+    (dose: number) => {
+      if (!doseRange) {
+        setTherapeuticDose(dose);
+        return;
+      }
+
+      const clamped = Math.min(Math.max(dose, doseRange.min), doseRange.max);
+      setTherapeuticDose(clamped);
+    },
+    [doseRange]
+  );
+
+  // Debounced version of the dose change handler for the slider
+  const { pendingValue: pendingDose, scheduleChange: scheduleDoseChange } =
+    useDebounce(therapeuticDose, 200, handleTherapeuticDoseChange);
+
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -695,41 +785,35 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
         </div>
       </div>
 
-      <div className="border-b border-gray-200 bg-white">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {RANGE_FILTERS.map((config) => (
-              <RangeFilterControl
-                key={config.key}
-                config={config}
-                value={filters.range[config.key]}
-                stats={metadataStats[config.key]}
-                histogram={histogramData?.[config.key]}
-                onChange={(value) => handleRangeChange(config.key, value)}
-              />
-            ))}
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {DISCRETE_FILTERS.map((config) => (
-              <DiscreteFilterControl
-                key={config.key}
-                config={config}
-                value={filters.discrete[config.key]}
-                onChange={(value) => handleDiscreteChange(config.key, value)}
-              />
-            ))}
-          </div>
-
-          <div className="flex items-center justify-end">
-            <button
-              type="button"
-              onClick={handleResetFilters}
-              className="inline-flex items-center rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-            >
-              Reset filters
-            </button>
-          </div>
+      <CompoundsFilters
+        rangeFilters={RANGE_FILTERS}
+        discreteFilters={DISCRETE_FILTERS}
+        filters={filters}
+        metadataStats={metadataStats}
+        histogramData={histogramData}
+        onRangeChange={handleRangeChange}
+        onDiscreteChange={handleDiscreteChange}
+        onResetFilters={handleResetFilters}
+      />
+      <div className="flex gap-6 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div className="flex-1">
+          <EmbeddingExplorerControl
+            embeddingWeightIndex={embeddingWeightIndex}
+            embeddingSelection={embeddingSelection}
+            embeddingError={embeddingError}
+            embeddingOptions={EMBEDDING_OPTIONS}
+            onOpenModal={() => setEmbeddingModalOpen(true)}
+            onClearSelection={() => handleEmbeddingSelectionChange([])}
+          />
+        </div>
+        <div className="flex-1">
+          <TherapeuticDoseControl
+            therapeuticDose={therapeuticDose}
+            pendingDose={pendingDose}
+            doseRange={doseRange}
+            onDoseChange={handleTherapeuticDoseChange}
+            onScheduleDoseChange={scheduleDoseChange}
+          />
         </div>
       </div>
 
@@ -751,6 +835,7 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                 if (!compound) {
                   return null;
                 }
+                const marginData = compoundMargins.get(compound.name);
 
                 return (
                   <div
@@ -763,13 +848,9 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
                     <div className="pb-6">
                       <CompoundRow
                         compound={compound}
-                        metadataStats={metadataStats}
-                        uncertaintyBadges={
-                          uncertaintyBadges?.[compound.name] as
-                            | CompoundUncertaintyBadges
-                            | undefined
-                        }
-                        descriptorHistograms={histogramData ?? undefined}
+                        therapeuticDose={therapeuticDose}
+                        aggregateMargin={marginData?.aggregate ?? null}
+                        endpointMargins={marginData?.endpoints}
                       />
                     </div>
                   </div>
@@ -779,6 +860,20 @@ const CompoundsViewer: React.FC<CompoundsViewerProps> = ({
           </div>
         )}
       </div>
+      <EmbeddingModal
+        isOpen={embeddingModalOpen}
+        onClose={closeEmbeddingModal}
+        options={EMBEDDING_OPTIONS}
+        currentIndex={embeddingWeightIndex}
+        onWeightChange={handleEmbeddingWeightChange}
+        onSelectionChange={handleEmbeddingSelectionChange}
+        selectedIds={embeddingSelection}
+        points={embeddingPoints}
+        loading={embeddingLoading}
+        error={embeddingError}
+        totalCompounds={compounds.length}
+        selectedDoseValue={therapeuticDose}
+      />
     </div>
   );
 };

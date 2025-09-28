@@ -12,21 +12,20 @@ import {
 } from "recharts";
 import { Compound } from "@/types/Compound";
 import MoleculeRenderer from "./MoleculeRenderer";
+import { DescriptorKey } from "@/types/MetadataStats";
 import {
-  DescriptorKey,
-  DescriptorStats,
-  MetadataStats,
-} from "@/types/MetadataStats";
-import {
-  CompoundUncertaintyBadges,
-  UncertaintyBadgeLevel,
-} from "@/types/UncertaintyBadges";
+  classifyMarginLevel,
+  EndpointMarginMap,
+  TOXIC_ENDPOINT_PREFIXES,
+  ToxicEndpointPrefix,
+} from "@/utils/safetyMetrics";
+import { parseNumericArrayString } from "@/utils/parsing";
 
 interface CompoundRowProps {
   compound: Compound;
-  metadataStats?: MetadataStats;
-  uncertaintyBadges?: CompoundUncertaintyBadges;
-  descriptorHistograms?: Partial<Record<DescriptorKey, number[]>>;
+  therapeuticDose: number;
+  aggregateMargin: number | null;
+  endpointMargins?: EndpointMarginMap;
 }
 
 interface DescriptorDisplayConfig {
@@ -68,11 +67,6 @@ const LD_COLORS: Record<(typeof LD_SUFFIXES)[number], string> = {
   ld50: "#f97316",
   ld80: "#dc2626",
 };
-const BADGE_STYLES: Record<UncertaintyBadgeLevel, string> = {
-  LOW: "bg-green-100 text-green-700 border border-green-200",
-  MEDIUM: "bg-yellow-100 text-yellow-800 border border-yellow-200",
-  HIGH: "bg-red-100 text-red-700 border border-red-200",
-};
 
 type TherapeuticWindowLevel = "BROAD" | "MODERATE" | "NARROW" | "ALERT";
 
@@ -82,11 +76,6 @@ const THERAPEUTIC_BADGE_STYLES: Record<TherapeuticWindowLevel, string> = {
   NARROW: "bg-orange-100 text-orange-800 border border-orange-200",
   ALERT: "bg-red-100 text-red-700 border border-red-200",
 };
-
-interface TherapeuticWindowSummary {
-  ratio: number;
-  level: TherapeuticWindowLevel;
-}
 
 const formatDescriptorValue = (value?: number, decimals = 2) => {
   if (value == null || Number.isNaN(value)) {
@@ -102,108 +91,6 @@ const formatDescriptorValue = (value?: number, decimals = 2) => {
   }
 
   return value.toFixed(decimals);
-};
-
-const clampPercent = (percent: number) => {
-  if (Number.isNaN(percent) || !Number.isFinite(percent)) {
-    return 0;
-  }
-  return Math.min(100, Math.max(0, percent));
-};
-
-const DescriptorBar: React.FC<{
-  config: DescriptorDisplayConfig;
-  value?: number;
-  stats?: DescriptorStats;
-  histogram?: number[];
-}> = ({ config, value, stats, histogram }) => {
-  const { label, unit, decimals } = config;
-  const range = stats ? stats.max - stats.min : 0;
-  const valuePercent =
-    stats && range > 0 && value != null
-      ? clampPercent(((value - stats.min) / range) * 100)
-      : 0;
-  const meanPercent =
-    stats && range > 0
-      ? clampPercent(((stats.mean - stats.min) / range) * 100)
-      : 0;
-
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-3">
-      <div className="flex items-center justify-between text-sm text-gray-700">
-        <span className="font-medium text-gray-800">{label}</span>
-        <span>
-          {formatDescriptorValue(value, decimals)}
-          {unit ? ` ${unit}` : ""}
-        </span>
-      </div>
-      {histogram && stats ? (
-        <div className="relative mt-2 h-16 overflow-hidden rounded bg-gray-100">
-          <div className="absolute inset-0 flex items-end gap-[1px] px-1 pb-1">
-            {histogram.map((height, index) => (
-              <span
-                key={`${config.key}-hist-${index}`}
-                className="flex-1 rounded-t bg-blue-200/70"
-                style={{ height: `${Math.max(height, 0.05) * 100}%` }}
-              />
-            ))}
-          </div>
-          <div className="absolute inset-0 rounded border border-blue-200/40" />
-          <div
-            className="absolute top-0 bottom-0 w-0.5 bg-gray-400/80"
-            style={{ left: `${meanPercent}%` }}
-            aria-hidden
-          />
-          {value != null && (
-            <div
-              className="absolute top-0 bottom-0 w-0.5 bg-blue-600"
-              style={{ left: `${valuePercent}%` }}
-              aria-hidden
-            />
-          )}
-        </div>
-      ) : (
-        <div className="relative h-2 w-full rounded bg-gray-200">
-          {stats && (
-            <>
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-gray-400"
-                style={{ left: `${meanPercent}%` }}
-              />
-              {value != null && (
-                <div
-                  className="absolute -top-1 h-4 w-1 rounded bg-blue-600"
-                  style={{ left: `calc(${valuePercent}% - 0.5px)` }}
-                />
-              )}
-            </>
-          )}
-        </div>
-      )}
-      {stats && (
-        <div className="flex justify-between text-[10px] text-gray-500">
-          <span>{formatDescriptorValue(stats.min, decimals)}</span>
-          <span>{formatDescriptorValue(stats.mean, decimals)}</span>
-          <span>{formatDescriptorValue(stats.max, decimals)}</span>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const parseNumericArrayString = (input?: string): number[] | null => {
-  if (!input) {
-    return null;
-  }
-
-  const cleaned = input.replace(/\[/g, " ").replace(/\]/g, " ");
-  const tokens = cleaned.replace(/,/g, " ").trim().split(/\s+/).filter(Boolean);
-
-  const values = tokens
-    .map((token) => Number(token))
-    .filter((value) => !Number.isNaN(value));
-
-  return values.length > 0 ? values : null;
 };
 
 const formatDose = (value: number) => {
@@ -229,40 +116,53 @@ const formatResponse = (value: number) => {
   return value.toPrecision(2);
 };
 
+const formatMargin = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) {
+    return "N/A";
+  }
+  return `${value.toFixed(2)}x`;
+};
+
 const CompoundRowComponent: React.FC<CompoundRowProps> = ({
   compound,
-  metadataStats,
-  uncertaintyBadges,
-  descriptorHistograms,
+  therapeuticDose,
+  aggregateMargin,
+  endpointMargins,
 }) => {
-  const therapeuticWindow = useMemo<TherapeuticWindowSummary | null>(() => {
-    const efficacy = compound.bioactivity_ld50;
-    const toxicity = compound.cell_count_ld50;
-
-    if (
-      typeof efficacy !== "number" ||
-      typeof toxicity !== "number" ||
-      efficacy <= 0 ||
-      toxicity <= 0
-    ) {
+  const worstMarginInfo = useMemo((): {
+    prefix: ToxicEndpointPrefix;
+    value: number;
+  } | null => {
+    if (!endpointMargins) {
       return null;
     }
 
-    const ratio = toxicity / efficacy;
+    let worst: { prefix: ToxicEndpointPrefix; value: number } | null = null;
 
-    let level: TherapeuticWindowLevel;
-    if (ratio >= 10) {
-      level = "BROAD";
-    } else if (ratio >= 3) {
-      level = "MODERATE";
-    } else if (ratio >= 1) {
-      level = "NARROW";
-    } else {
-      level = "ALERT";
+    TOXIC_ENDPOINT_PREFIXES.forEach((prefix) => {
+      const margin = endpointMargins[prefix];
+      if (margin == null || !Number.isFinite(margin)) {
+        return;
+      }
+
+      if (!worst || margin < worst.value) {
+        worst = { prefix, value: margin };
+      }
+    });
+    return worst;
+  }, [endpointMargins]);
+
+  const therapeuticWindow = useMemo(() => {
+    if (aggregateMargin == null || !Number.isFinite(aggregateMargin)) {
+      return null;
     }
 
-    return { ratio, level };
-  }, [compound.bioactivity_ld50, compound.cell_count_ld50]);
+    const level = classifyMarginLevel(
+      aggregateMargin
+    ) as TherapeuticWindowLevel;
+    return { ratio: aggregateMargin, level };
+  }, [aggregateMargin]);
+
   const availableEndpoints = useMemo(
     () =>
       ENDPOINTS.filter((endpoint) => {
@@ -276,6 +176,26 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
   const [selectedEndpoint, setSelectedEndpoint] = useState<EndpointKey>(
     availableEndpoints[0]?.key ?? ENDPOINTS[0].key
   );
+
+  const therapeuticWindowMessage = useMemo(() => {
+    if (!therapeuticWindow || therapeuticWindow.ratio == null) {
+      return null;
+    }
+
+    const worstLabel = worstMarginInfo
+      ? ENDPOINTS.find((item) => item.key === worstMarginInfo.prefix)?.label ??
+        worstMarginInfo.prefix
+      : null;
+
+    const marginText = `${therapeuticWindow.ratio.toFixed(2)}x`;
+    const doseText = therapeuticDose > 0 ? formatDose(therapeuticDose) : "N/A";
+
+    if (worstLabel) {
+      return `At dose ${doseText}, the ${worstLabel} margin is ${marginText}.`;
+    }
+
+    return `At dose ${doseText}, aggregate margin is ${marginText}.`;
+  }, [therapeuticDose, therapeuticWindow, worstMarginInfo]);
 
   useEffect(() => {
     if (availableEndpoints.length === 0) {
@@ -370,7 +290,6 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
 
   const ladderRows = useMemo(() => {
     return toxicityRows.map((row) => {
-      const uncertainty = uncertaintyBadges?.[row.endpoint.key];
       const sanitized = row.values.map((value) =>
         value != null && value > 0 ? value : undefined
       );
@@ -379,6 +298,12 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
       );
       const min = numeric.length > 0 ? Math.min(...numeric) : undefined;
       const max = numeric.length > 0 ? Math.max(...numeric) : undefined;
+      const margin = endpointMargins
+        ? endpointMargins[row.endpoint.key as ToxicEndpointPrefix]
+        : null;
+      const marginLevel = classifyMarginLevel(
+        margin ?? null
+      ) as TherapeuticWindowLevel;
 
       return {
         key: row.endpoint.key,
@@ -386,10 +311,11 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
         values: sanitized,
         min,
         max,
-        badge: uncertainty?.badge,
+        margin,
+        marginLevel,
       };
     });
-  }, [toxicityRows, uncertaintyBadges]);
+  }, [endpointMargins, toxicityRows]);
 
   const ladderDomain = useMemo(() => {
     let min = Number.POSITIVE_INFINITY;
@@ -472,30 +398,33 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
     [selectedEndpoint]
   );
 
-  const selectedEndpointBadge = uncertaintyBadges?.[selectedEndpoint]?.badge;
-
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition-shadow hover:shadow-md">
-      <div className="flex flex-col gap-6 lg:flex-row">
-        <div className="flex w-full flex-col gap-4 lg:w-1/4">
+    <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm transition-shadow hover:shadow-md w-full max-w-5xl mx-auto">
+      <div className="flex flex-row gap-4 items-stretch">
+        {/* Left: Compound info in column layout */}
+        <div className="flex w-80 flex-col gap-3">
           <MoleculeRenderer
             smiles={compound.smiles}
             inchi={compound.inchi}
-            width={220}
-            height={180}
+            width={200}
+            height={160}
             className="w-full"
           />
-          <div className="space-y-1 text-sm text-gray-700">
+          <div className="space-y-2 text-sm text-gray-700">
             <div className="text-lg font-semibold text-gray-900">
               {compound.name}
             </div>
             <div>ID: {compound.id}</div>
-            {compound.split && <div>Split: {compound.split}</div>}
+            {compound.split && (
+              <div className="text-sm text-gray-600">
+                Split: {compound.split}
+              </div>
+            )}
             {therapeuticWindow && (
-              <div className="mt-2 flex flex-col gap-1 text-xs text-gray-600">
+              <div className="mt-2 flex flex-col gap-1">
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-gray-800">
-                    Therapeutic Window
+                  <span className="text-xs font-medium text-gray-700">
+                    Therapeutic Window:
                   </span>
                   <span
                     className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
@@ -505,125 +434,148 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
                     {therapeuticWindow.level}
                   </span>
                 </div>
-                <span>
-                  Cell Count LD50 is {therapeuticWindow.ratio.toFixed(2)}x
-                  higher than Bioactivity LD50
-                </span>
+                {therapeuticWindowMessage && (
+                  <div className="text-xs text-gray-600">
+                    {therapeuticWindowMessage}
+                  </div>
+                )}
               </div>
             )}
+
+            {/* Properties tooltip trigger */}
+            <div className="group relative">
+              <button className="text-xs text-blue-600 hover:text-blue-800 underline">
+                View Properties ({DESCRIPTORS.length} descriptors)
+              </button>
+              <div className="absolute left-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-xl p-3 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                <h4 className="text-sm font-semibold text-gray-800 mb-2">
+                  Properties
+                </h4>
+                <div className="grid grid-cols-2 gap-2">
+                  {DESCRIPTORS.map((descriptor) => {
+                    const value = compound[descriptor.key] as
+                      | number
+                      | undefined;
+                    const formattedValue = formatDescriptorValue(
+                      value,
+                      descriptor.decimals
+                    );
+                    return (
+                      <div
+                        key={descriptor.key}
+                        className="flex justify-between text-xs"
+                      >
+                        <span className="text-gray-600">
+                          {descriptor.label}:
+                        </span>
+                        <span className="font-medium text-gray-900">
+                          {formattedValue}
+                          {descriptor.unit && (
+                            <span className="text-gray-500 ml-1">
+                              {descriptor.unit}
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div className="grid w-full grid-cols-1 gap-4 md:grid-cols-2 lg:w-7/12">
-          {DESCRIPTORS.map((descriptor) => (
-            <DescriptorBar
-              key={descriptor.key}
-              config={descriptor}
-              value={compound[descriptor.key] as number | undefined}
-              stats={metadataStats?.[descriptor.key]}
-              histogram={descriptorHistograms?.[descriptor.key]}
-            />
-          ))}
-        </div>
-
-        <div className="flex w-full flex-col gap-4 lg:w-1/3">
-          <div className="rounded-lg border border-gray-200 p-4">
-            <div className="mb-3 flex items-center justify-between">
+        {/* Center: Compact LD Ladder */}
+        <div className="flex-1 min-w-0">
+          <div className="rounded-lg border border-gray-200 p-3 h-full">
+            <div className="mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-900">LD Ladder</h3>
+              <div className="flex gap-2 text-xs text-gray-600">
+                {LD_SUFFIXES.map((suffix) => (
+                  <div
+                    key={`legend-${suffix}`}
+                    className="flex items-center gap-1"
+                  >
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: LD_COLORS[suffix] }}
+                    />
+                    <span>{suffix.toUpperCase()}</span>
+                  </div>
+                ))}
+              </div>
             </div>
             {!ladderScale || ladderRows.length === 0 ? (
-              <div className="h-60 flex items-center justify-center text-sm text-gray-500">
+              <div className="h-40 flex items-center justify-center text-sm text-gray-500">
                 LD data not available.
               </div>
             ) : (
-              <div className="space-y-6">
-                <div className="flex flex-wrap gap-4 text-xs text-gray-600">
-                  {LD_SUFFIXES.map((suffix) => (
-                    <div
-                      key={`legend-${suffix}`}
-                      className="flex items-center gap-2"
-                    >
-                      <span
-                        className="h-2.5 w-2.5 rounded-full"
-                        style={{ backgroundColor: LD_COLORS[suffix] }}
-                      />
-                      <span>{suffix.toUpperCase()}</span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="space-y-4">
-                  {ladderRows.map((row) => (
-                    <div key={row.key} className="space-y-1">
-                      <div className="flex items-center justify-between text-xs text-gray-600">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-gray-800">
-                            {row.label}
+              <div className="space-y-1.5">
+                {ladderRows.map((row) => (
+                  <div key={row.key} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1">
+                        <span className="font-medium text-gray-800 text-[10px]">
+                          {row.label}
+                        </span>
+                        {row.key !== "bioactivity" && (
+                          <span
+                            className={`rounded-full px-1 py-0.5 text-[8px] font-semibold ${
+                              THERAPEUTIC_BADGE_STYLES[row.marginLevel]
+                            }`}
+                          >
+                            {formatMargin(row.margin)}
                           </span>
-                          {row.badge ? (
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
-                                BADGE_STYLES[row.badge]
-                              }`}
-                            >
-                              {row.badge}
-                            </span>
-                          ) : null}
-                        </div>
-                        {row.min != null && row.max != null ? (
-                          <span>{`${formatDose(row.min)} - ${formatDose(
-                            row.max
-                          )}`}</span>
-                        ) : (
-                          <span className="text-gray-400">No LD range</span>
                         )}
                       </div>
-                      <div className="relative h-2 rounded bg-gray-200">
-                        {row.min != null && row.max != null ? (
-                          <span
-                            className="absolute top-0 bottom-0 rounded bg-gray-400/70"
-                            style={{
-                              left: `${ladderScale(row.min)}%`,
-                              width: `${Math.max(
-                                ladderScale(row.max) - ladderScale(row.min),
-                                2
-                              )}%`,
-                            }}
-                          />
-                        ) : null}
-                        {row.values.map((value, index) => {
-                          if (value == null || value <= 0) {
-                            return null;
-                          }
-                          const position = ladderScale(value);
-                          return (
-                            <span
-                              key={`${row.key}-${LD_SUFFIXES[index]}`}
-                              className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white shadow-sm"
-                              style={{
-                                left: `${position}%`,
-                                backgroundColor: LD_COLORS[LD_SUFFIXES[index]],
-                              }}
-                              title={`${row.label} ${LD_SUFFIXES[
-                                index
-                              ].toUpperCase()}: ${formatDose(value)}`}
-                            />
-                          );
-                        })}
-                      </div>
+                      {row.min != null && row.max != null && (
+                        <span className="text-gray-500 text-[9px]">
+                          {formatDose(row.min)}-{formatDose(row.max)}
+                        </span>
+                      )}
                     </div>
-                  ))}
-                </div>
-
-                <div className="pt-2">
+                    <div className="relative h-1 rounded bg-gray-200">
+                      {row.min != null && row.max != null && (
+                        <span
+                          className="absolute top-0 bottom-0 rounded bg-gray-400/70"
+                          style={{
+                            left: `${ladderScale(row.min)}%`,
+                            width: `${Math.max(
+                              ladderScale(row.max) - ladderScale(row.min),
+                              2
+                            )}%`,
+                          }}
+                        />
+                      )}
+                      {row.values.map((value, index) => {
+                        if (value == null || value <= 0) return null;
+                        const position = ladderScale(value);
+                        return (
+                          <span
+                            key={`${row.key}-${LD_SUFFIXES[index]}`}
+                            className="absolute top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white shadow-sm"
+                            style={{
+                              left: `${position}%`,
+                              backgroundColor: LD_COLORS[LD_SUFFIXES[index]],
+                            }}
+                            title={`${row.label} ${LD_SUFFIXES[
+                              index
+                            ].toUpperCase()}: ${formatDose(value)}`}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <div className="pt-1">
                   <div className="relative h-px bg-gray-200" />
-                  <div className="relative mt-1 h-4">
+                  <div className="relative mt-1 h-2">
                     {ladderTicks.map((tick) => {
                       const position = ladderScale(tick);
                       return (
                         <span
                           key={`tick-${tick}`}
-                          className="absolute -translate-x-1/2 text-[11px] text-gray-500"
+                          className="absolute -translate-x-1/2 text-[9px] text-gray-500"
                           style={{ left: `${position}%` }}
                         >
                           {formatDose(tick)}
@@ -635,27 +587,21 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
               </div>
             )}
           </div>
+        </div>
 
-          <div className="rounded-lg border border-gray-200 p-4">
-            <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <div className="flex items-center gap-2">
-                <h3 className="text-xs font-semibold text-gray-900">
-                  Dose-Response
-                </h3>
-                {selectedEndpointBadge ? (
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${BADGE_STYLES[selectedEndpointBadge]}`}
-                  >
-                    {selectedEndpointBadge}
-                  </span>
-                ) : null}
-              </div>
+        {/* Right: Dose-Response plot */}
+        <div className="w-96 flex flex-col">
+          <div className="rounded-lg border border-gray-200 p-3 flex-1 flex flex-col min-h-0">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-900">
+                Dose-Response
+              </h3>
               <select
                 value={selectedEndpoint}
                 onChange={(event) =>
                   setSelectedEndpoint(event.target.value as EndpointKey)
                 }
-                className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="rounded border border-gray-300 px-2 py-1 text-xs focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
                 {availableEndpoints.map((endpoint) => (
                   <option key={endpoint.key} value={endpoint.key}>
@@ -665,11 +611,11 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
               </select>
             </div>
             {chartData && doseDomain ? (
-              <div className="h-60">
+              <div className="flex-1 min-h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart
                     data={chartData}
-                    margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                    margin={{ top: 5, right: 5, left: 0, bottom: 5 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis
@@ -679,23 +625,22 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
                       domain={doseDomain}
                       tickFormatter={formatDose}
                       stroke="#4b5563"
+                      fontSize={10}
                     />
                     <YAxis
                       tickFormatter={formatResponse}
                       stroke="#4b5563"
-                      width={45}
+                      width={35}
+                      fontSize={10}
                     />
                     <Tooltip
                       formatter={(value: number, key: string) => {
-                        if (key === "mean") {
+                        if (key === "mean")
                           return [formatResponse(value), "Mean"];
-                        }
-                        if (key === "lower") {
+                        if (key === "lower")
                           return [formatResponse(value), "Lower"];
-                        }
-                        if (key === "range") {
+                        if (key === "range")
                           return [formatResponse(value), "Range"];
-                        }
                         return [formatResponse(value), key];
                       }}
                       labelFormatter={(label: number) =>
@@ -720,7 +665,7 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
                       dataKey="mean"
                       stroke={selectedEndpointConfig?.color ?? "#2563eb"}
                       strokeWidth={2}
-                      dot={{ r: 1.5 }}
+                      dot={{ r: 1 }}
                     />
                     {ldValues.map((value, index) =>
                       value != null ? (
@@ -732,9 +677,9 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
                           label={{
                             value: LD_SUFFIXES[index].toUpperCase(),
                             position: "insideTop",
-                            offset: 10,
+                            offset: 5,
                             fill: "#92400e",
-                            fontSize: 10,
+                            fontSize: 8,
                           }}
                         />
                       ) : null
@@ -743,7 +688,7 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
                 </ResponsiveContainer>
               </div>
             ) : (
-              <div className="h-60 flex items-center justify-center text-sm text-gray-500">
+              <div className="flex-1 flex items-center justify-center text-sm text-gray-500">
                 Dose-response data not available.
               </div>
             )}
@@ -757,8 +702,9 @@ const CompoundRowComponent: React.FC<CompoundRowProps> = ({
 const CompoundRow = memo(CompoundRowComponent, (prevProps, nextProps) => {
   return (
     prevProps.compound.id === nextProps.compound.id &&
-    prevProps.metadataStats === nextProps.metadataStats &&
-    prevProps.descriptorHistograms === nextProps.descriptorHistograms
+    prevProps.therapeuticDose === nextProps.therapeuticDose &&
+    prevProps.aggregateMargin === nextProps.aggregateMargin &&
+    prevProps.endpointMargins === nextProps.endpointMargins
   );
 });
 
